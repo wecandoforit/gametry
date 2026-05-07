@@ -189,7 +189,7 @@ void DrawPieces(GameLib& g, const ChessBoard& board,
 // Rendering: Bottom UI
 // ============================================================
 void DrawUI(GameLib& g, const ChessBoard& board, bool aiMode, bool gameOver,
-            const char* gameOverMsg, int nodes)
+            const char* gameOverMsg, int nodes, int qnodes, double searchTime)
 {
     int fs = 18, panelY = 605, btnY = panelY + 12, btnH = 36, btnW = 90;
 
@@ -242,14 +242,23 @@ void DrawUI(GameLib& g, const ChessBoard& board, bool aiMode, bool gameOver,
     snprintf(buf, sizeof(buf), "第%d手", board.MoveCount() + 1);
     g.DrawTextFont(580, timeY, buf, C_UI_TEXT, tf);
 
-    // AI nodes
+    // AI nodes + time
     if (nodes > 0) {
         int n = nodes;
         const char* u = "";
         if (n >= 1000000) { n /= 1000000; u = "M"; }
         else if (n >= 1000) { n /= 1000; u = "K"; }
-        snprintf(buf, sizeof(buf), "搜索:%d%s", n, u);
+        snprintf(buf, sizeof(buf), "主搜:%d%s", n, u);
         g.DrawTextFont(580, timeY + 20, buf, C_UI_TEXT, 14);
+        if (qnodes > 0) {
+            int qn = qnodes;
+            if (qn >= 1000) { qn /= 1000; u = "K"; }
+            else u = "";
+            snprintf(buf, sizeof(buf), "静搜:%d%s", qn, u);
+            g.DrawTextFont(580, timeY + 36, buf, C_UI_TEXT, 14);
+        }
+        snprintf(buf, sizeof(buf), "用时:%.1fs", searchTime);
+        g.DrawTextFont(580, timeY + 52, buf, C_UI_TEXT, 14);
     }
 
     // Status line
@@ -308,7 +317,7 @@ inline UIClick HitTest(int sx, int sy, bool aiMode, bool gameOver) {
 // ============================================================
 struct GameState {
     ChessBoard board;
-    ChessAI    ai{3};
+    ChessAI    ai;
     bool aiMode    = false;
     bool gameOver  = false;
     const char* overMsg = nullptr;
@@ -320,7 +329,8 @@ struct GameState {
     bool  showHint = false;
     bool  needAI   = false;
     bool  inCheck  = false;
-    int   lastNodes= 0;
+    int   lastNodes = 0;
+    int   lastQNodes= 0;
     float lastTime = 0;
 
     // Status message
@@ -339,7 +349,7 @@ struct GameState {
         showHint = false;
         needAI   = false;
         inCheck  = false;
-        lastNodes= 0;
+        lastNodes = 0; lastQNodes = 0;
     }
 
     const Move* LastMovePtr() {
@@ -356,6 +366,8 @@ int main() {
     g.ShowMouse(true);
 
     GameState s;
+    s.ai.SetMaxDepth(12);
+    s.ai.SetTimeLimit(3.0);
     s.lastTime = g.GetTime();
 
     while (!g.IsClosed()) {
@@ -391,14 +403,14 @@ int main() {
             s.validMoves.clear();
             s.showHint = false;
             s.inCheck = s.board.IsInCheck();
-            s.lastNodes = 0;
+            s.lastNodes = 0; s.lastQNodes = 0;
             s.needAI = false;
         }
 
         if (g.IsKeyPressed(KEY_H) && !s.gameOver && !s.aiMode) {
             s.hintMove = s.ai.GetBestMove(s.board);
             s.showHint = true;
-            s.lastNodes = s.ai.GetNodes();
+            s.lastNodes = s.ai.GetNodes(); s.lastQNodes = s.ai.GetQNodes();
             Sound::Click(g);
         }
 
@@ -423,7 +435,7 @@ int main() {
                     s.validMoves.clear();
                     s.showHint = false;
                     s.inCheck = s.board.IsInCheck();
-                    s.lastNodes = 0;
+                    s.lastNodes = 0; s.lastQNodes = 0;
                     s.needAI = false;
                 }
                 break;
@@ -433,7 +445,7 @@ int main() {
                 if (!s.gameOver && !s.aiMode) {
                     s.hintMove = s.ai.GetBestMove(s.board);
                     s.showHint = true;
-                    s.lastNodes = s.ai.GetNodes();
+                    s.lastNodes = s.ai.GetNodes(); s.lastQNodes = s.ai.GetQNodes();
                 }
                 break;
 
@@ -450,7 +462,7 @@ int main() {
                 s.validMoves.clear();
                 s.showHint = false;
                 s.needAI = false;
-                s.lastNodes = 0;
+                s.lastNodes = 0; s.lastQNodes = 0;
                 break;
 
             case U_BOARD:
@@ -478,7 +490,7 @@ int main() {
                             s.selR = s.selC = -1;
                             s.validMoves.clear();
                             s.showHint = false;
-                            s.lastNodes = 0;
+                            s.lastNodes = 0; s.lastQNodes = 0;
 
                             s.inCheck = s.board.IsInCheck();
                             if (isCap)       Sound::Capture(g);
@@ -537,14 +549,14 @@ int main() {
             DrawBoard(g);
             DrawPieces(g, s.board, -1, -1, {}, s.LastMovePtr(),
                        s.showHint ? &s.hintMove : nullptr, s.inCheck);
-            DrawUI(g, s.board, s.aiMode, false, nullptr, s.lastNodes);
+            DrawUI(g, s.board, s.aiMode, false, nullptr, s.lastNodes, s.lastQNodes, s.ai.LastTime());
             int tw = g.GetTextWidthFont("AI思考中...", 20);
             g.DrawTextFont((WIN_W - tw)/2, BOARD_Y - 30, "AI思考中...", C_HINT, 20);
             g.Update();
 
             // Compute
             Move aim = s.ai.GetBestMove(s.board);
-            s.lastNodes = s.ai.GetNodes();
+            s.lastNodes = s.ai.GetNodes(); s.lastQNodes = s.ai.GetQNodes();
 
             if (aim.fromRow >= 0) {
                 bool isCap = !aim.captured.IsEmpty();
@@ -571,7 +583,7 @@ int main() {
         DrawBoard(g);
         DrawPieces(g, s.board, s.selR, s.selC, s.validMoves, s.LastMovePtr(),
                    s.showHint ? &s.hintMove : nullptr, s.inCheck);
-        DrawUI(g, s.board, s.aiMode, s.gameOver, s.overMsg, s.lastNodes);
+        DrawUI(g, s.board, s.aiMode, s.gameOver, s.overMsg, s.lastNodes, s.lastQNodes, s.ai.LastTime());
         DrawStatusMsg(g, s.statusMsg);
 
         g.Update();

@@ -2,6 +2,33 @@
 #include <vector>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
+#include <ctime>
+
+// ============================================================
+// Zobrist hash — keys for incremental board hashing
+// ============================================================
+
+static uint64_t s_zkey[8][2][10][9];  // [type][color][row][col]
+static uint64_t s_zside = 0;
+static bool s_zinit = false;
+
+inline void InitZobrist() {
+    if (s_zinit) return;
+    s_zinit = true;
+    uint64_t seed = 0x9E3779B97F4A7C15ULL;
+    auto rnd = [&]() -> uint64_t {
+        seed ^= seed >> 12; seed ^= seed << 25;
+        seed ^= seed >> 27;
+        return seed * 0x2545F4914F6CDD1DULL;
+    };
+    for (int t = 1; t <= 7; t++)
+        for (int s = 0; s <= 1; s++)
+            for (int r = 0; r < 10; r++)
+                for (int c = 0; c < 9; c++)
+                    s_zkey[t][s][r][c] = rnd();
+    s_zside = rnd();
+}
 
 // ============================================================
 // Types
@@ -52,10 +79,12 @@ public:
     bool  HasHistory()        const { return !m_history.empty(); }
     const Move& LastMove()    const { return m_history.back(); }
     int   HistorySize()       const { return (int)m_history.size(); }
+    uint64_t Hash()           const { return m_hash; }
 
     // --- Move generation (non-const: temporarily mutates board for check-test) ---
     std::vector<Move> GetLegalMoves(int row, int col);
     std::vector<Move> GetAllLegalMoves();
+    std::vector<Move> GetLegalCaptures();  // only capture moves (for quiescence)
     bool IsMoveLegal(const Move& m);
 
     // --- Move execution ---
@@ -82,6 +111,7 @@ private:
     float m_redTime  = 0;
     float m_blackTime= 0;
     int   m_moves    = 0;
+    uint64_t m_hash  = 0;
 
     // --- Private helpers ---
     bool IsKingInCheck(Side kingSide) const;
@@ -172,6 +202,15 @@ inline void ChessBoard::Init() {
     m_history.clear();
     m_redTime = m_blackTime = 0;
     m_moves = 0;
+
+    // Build initial Zobrist hash
+    InitZobrist();
+    m_hash = 0;
+    if (m_side == BLACK) m_hash ^= s_zside;
+    for (int r = 0; r < ROWS; r++)
+        for (int c = 0; c < COLS; c++)
+            if (!m_cells[r][c].IsEmpty())
+                m_hash ^= s_zkey[m_cells[r][c].type][m_cells[r][c].side][r][c];
 }
 
 // ============================================================
@@ -425,13 +464,41 @@ inline std::vector<Move> ChessBoard::GetAllLegalMoves() {
     return all;
 }
 
+inline std::vector<Move> ChessBoard::GetLegalCaptures() {
+    std::vector<Move> caps;
+    for (int r = 0; r < ROWS; r++)
+        for (int c = 0; c < COLS; c++)
+            if (m_cells[r][c].IsSide(m_side)) {
+                std::vector<Move> pseudo;
+                GenPieceMoves(r, c, pseudo);
+                for (const auto& m : pseudo)
+                    if (!m.captured.IsEmpty() && IsMoveLegal(m))
+                        caps.push_back(m);
+            }
+    return caps;
+}
+
 // ============================================================
 // Move execution
 // ============================================================
 
 inline void ChessBoard::ExecuteMove(const Move& m) {
-    m_cells[m.toRow][m.toCol] = m_cells[m.fromRow][m.fromCol];
+    const Piece& mover = m_cells[m.fromRow][m.fromCol];
+    const Piece  cap   = m_cells[m.toRow][m.toCol];
+
+    // XOR out old positions
+    m_hash ^= s_zkey[mover.type][mover.side][m.fromRow][m.fromCol];
+    if (!cap.IsEmpty())
+        m_hash ^= s_zkey[cap.type][cap.side][m.toRow][m.toCol];
+
+    // Move
+    m_cells[m.toRow][m.toCol] = mover;
     m_cells[m.fromRow][m.fromCol] = {EMPTY, BLACK};
+
+    // XOR in new position + toggle side
+    m_hash ^= s_zkey[mover.type][mover.side][m.toRow][m.toCol];
+    m_hash ^= s_zside;
+
     m_history.push_back(m);
     m_moves++;
     m_side = Opponent(m_side);
@@ -440,8 +507,21 @@ inline void ChessBoard::ExecuteMove(const Move& m) {
 inline bool ChessBoard::UndoMove() {
     if (m_history.empty()) return false;
     const Move& m = m_history.back();
-    m_cells[m.fromRow][m.fromCol] = m_cells[m.toRow][m.toCol];
+    const Piece& mover = m_cells[m.toRow][m.toCol];
+
+    // XOR out current position of moved piece
+    m_hash ^= s_zkey[mover.type][mover.side][m.toRow][m.toCol];
+    if (!m.captured.IsEmpty())
+        m_hash ^= s_zkey[m.captured.type][m.captured.side][m.toRow][m.toCol];
+
+    // Undo
+    m_cells[m.fromRow][m.fromCol] = mover;
     m_cells[m.toRow][m.toCol] = m.captured;
+
+    // XOR back original position + toggle side
+    m_hash ^= s_zkey[mover.type][mover.side][m.fromRow][m.fromCol];
+    m_hash ^= s_zside;
+
     m_history.pop_back();
     m_moves--;
     m_side = Opponent(m_side);
